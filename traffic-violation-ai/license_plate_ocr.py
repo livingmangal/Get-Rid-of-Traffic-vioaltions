@@ -1,51 +1,322 @@
-import os
 import cv2
-import csv
+import os
 import re
+import csv
+import numpy as np
 import easyocr
-from datetime import datetime
 from ultralytics import YOLO
+from datetime import datetime
+
+
+# =========================
+# CONFIG
+# =========================
+
+VIDEO_CANDIDATES = [
+    "videos/day_traffic.mp4.mp4",
+    "videos/day_traffic.mp4",
+    "videos/night.mp4.mp4",
+    "videos/night.mp4",
+    "videos/no_helmet.mp4.mp4",
+    "videos/no_helmet.mp4"
+]
+
+OUTPUT_VIDEO = "outputs/license_plate_ocr_improved.mp4"
+OUTPUT_CSV = "data/license_plate_ocr_improved_report.csv"
+PLATE_EVIDENCE_DIR = "outputs/plate_evidence"
+
+PROCESS_EVERY_N_FRAMES = 30
+MAX_SECONDS_TO_PROCESS = 35
+OCR_MIN_TEXT_LENGTH = 5
+
+VEHICLE_CLASSES = ["car", "bus", "truck", "motorcycle"]
 
 os.makedirs("outputs", exist_ok=True)
 os.makedirs("data", exist_ok=True)
+os.makedirs(PLATE_EVIDENCE_DIR, exist_ok=True)
 
-VIDEO_PATH = "videos/night.mp4.mp4"
-OUTPUT_PATH = "outputs/license_plate_ocr.mp4"
-CSV_PATH = "data/license_plate_ocr_report.csv"
 
-model = YOLO("yolov8n.pt")
+# =========================
+# SELECT VIDEO
+# =========================
+
+VIDEO_PATH = None
+
+for path in VIDEO_CANDIDATES:
+    if os.path.exists(path):
+        VIDEO_PATH = path
+        break
+
+if VIDEO_PATH is None:
+    print("❌ No video found inside videos folder.")
+    print("Put your video inside traffic-violation-ai/videos/")
+    exit()
+
+print(f"✅ Using video: {VIDEO_PATH}")
+
+
+# =========================
+# LOAD MODELS
+# =========================
+
+print("Loading YOLO vehicle model...")
+vehicle_model = YOLO("yolov8n.pt")
+
+print("Loading EasyOCR...")
 reader = easyocr.Reader(["en"], gpu=False)
 
-vehicle_classes = ["car", "truck", "bus", "motorcycle"]
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+
+def clean_plate_text(text):
+    """
+    Cleans OCR output and keeps only uppercase letters/numbers.
+    Example: 'BR 01 AB 1234' -> 'BR01AB1234'
+    """
+    text = text.upper()
+    text = re.sub(r"[^A-Z0-9]", "", text)
+    return text
+
+
+def looks_like_indian_plate(text):
+    """
+    Indian plate examples:
+    BR01AB1234
+    DL8CAF5030
+    KA05MN1234
+    """
+    pattern = r"^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{3,4}$"
+    return re.match(pattern, text) is not None
+
+
+def enhance_plate_for_ocr(plate_img):
+    """
+    Creates multiple enhanced versions of the plate.
+    OCR is tried on all versions and best result is selected.
+    """
+
+    enhanced_images = []
+
+    if plate_img is None or plate_img.size == 0:
+        return enhanced_images
+
+    # 1. Zoom 4x
+    zoomed = cv2.resize(
+        plate_img,
+        None,
+        fx=4,
+        fy=4,
+        interpolation=cv2.INTER_CUBIC
+    )
+
+    enhanced_images.append(zoomed)
+
+    # 2. Grayscale
+    gray = cv2.cvtColor(zoomed, cv2.COLOR_BGR2GRAY)
+
+    # 3. CLAHE contrast enhancement
+    clahe = cv2.createCLAHE(
+        clipLimit=3.0,
+        tileGridSize=(8, 8)
+    )
+    contrast = clahe.apply(gray)
+    enhanced_images.append(contrast)
+
+    # 4. Denoise
+    denoised = cv2.bilateralFilter(
+        contrast,
+        11,
+        17,
+        17
+    )
+    enhanced_images.append(denoised)
+
+    # 5. Sharpen
+    kernel = np.array([
+        [0, -1, 0],
+        [-1, 5, -1],
+        [0, -1, 0]
+    ])
+    sharpened = cv2.filter2D(denoised, -1, kernel)
+    enhanced_images.append(sharpened)
+
+    # 6. Otsu threshold
+    _, otsu = cv2.threshold(
+        sharpened,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    enhanced_images.append(otsu)
+
+    # 7. Adaptive threshold
+    adaptive = cv2.adaptiveThreshold(
+        sharpened,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        8
+    )
+    enhanced_images.append(adaptive)
+
+    return enhanced_images
+
+
+def run_best_ocr(plate_img):
+    """
+    Runs OCR on multiple enhanced versions and returns best text.
+    """
+
+    best_text = ""
+    best_conf = 0
+
+    enhanced_versions = enhance_plate_for_ocr(plate_img)
+
+    for img in enhanced_versions:
+        try:
+            results = reader.readtext(
+                img,
+                detail=1,
+                paragraph=False,
+                allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+            )
+
+            for result in results:
+                text = clean_plate_text(result[1])
+                conf = float(result[2])
+
+                if len(text) < OCR_MIN_TEXT_LENGTH:
+                    continue
+
+                score = conf
+
+                # Bonus if text looks like Indian plate
+                if looks_like_indian_plate(text):
+                    score += 0.40
+
+                if score > best_conf:
+                    best_conf = score
+                    best_text = text
+
+        except Exception:
+            continue
+
+    return best_text, round(best_conf, 2)
+
+
+def find_plate_candidates(vehicle_crop):
+    """
+    Finds possible plate-like rectangular regions inside a vehicle crop.
+    This is a fallback plate detector when no custom plate model is used.
+    """
+
+    candidates = []
+
+    if vehicle_crop is None or vehicle_crop.size == 0:
+        return candidates
+
+    h, w = vehicle_crop.shape[:2]
+
+    # Number plates are usually in lower half of vehicle
+    lower_half = vehicle_crop[int(h * 0.45):h, :]
+
+    gray = cv2.cvtColor(lower_half, cv2.COLOR_BGR2GRAY)
+    gray = cv2.bilateralFilter(gray, 11, 17, 17)
+
+    edges = cv2.Canny(gray, 80, 200)
+
+    contours, _ = cv2.findContours(
+        edges,
+        cv2.RETR_TREE,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    for contour in contours:
+        x, y, cw, ch = cv2.boundingRect(contour)
+
+        if ch == 0:
+            continue
+
+        aspect_ratio = cw / ch
+        area = cw * ch
+
+        # Plate-like rectangle conditions
+        if 2.0 <= aspect_ratio <= 6.5 and area > 700:
+            absolute_y = y + int(h * 0.45)
+
+            px1 = max(0, x - 5)
+            py1 = max(0, absolute_y - 5)
+            px2 = min(w, x + cw + 5)
+            py2 = min(h, absolute_y + ch + 5)
+
+            candidate = vehicle_crop[py1:py2, px1:px2]
+
+            if candidate.size > 0:
+                candidates.append((px1, py1, px2, py2, candidate))
+
+    # Fallback: lower-middle crop if contour fails
+    if len(candidates) == 0:
+        px1 = int(w * 0.20)
+        px2 = int(w * 0.80)
+        py1 = int(h * 0.55)
+        py2 = int(h * 0.90)
+
+        fallback = vehicle_crop[py1:py2, px1:px2]
+
+        if fallback.size > 0:
+            candidates.append((px1, py1, px2, py2, fallback))
+
+    return candidates
+
+
+# =========================
+# VIDEO SETUP
+# =========================
 
 cap = cv2.VideoCapture(VIDEO_PATH)
 
 if not cap.isOpened():
-    print("Video not found:", VIDEO_PATH)
+    print("❌ Could not open video.")
     exit()
 
+fps = int(cap.get(cv2.CAP_PROP_FPS))
 width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-fps = int(cap.get(cv2.CAP_PROP_FPS)) or 30
-
+max_frames_to_process = fps * MAX_SECONDS_TO_PROCESS
+fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out = cv2.VideoWriter(
-    OUTPUT_PATH,
-    cv2.VideoWriter_fourcc(*"mp4v"),
+    OUTPUT_VIDEO,
+    fourcc,
     fps,
     (width, height)
 )
 
-evidence_id = "LP-" + datetime.now().strftime("%Y%m%d-%H%M%S")
+csv_file = open(OUTPUT_CSV, "w", newline="", encoding="utf-8")
+writer = csv.writer(csv_file)
 
-frame_no = 0
-vehicles_detected = 0
-plates_detected = 0
-plate_records = []
+writer.writerow([
+    "evidence_id",
+    "timestamp",
+    "frame_number",
+    "vehicle_type",
+    "plate_text",
+    "ocr_confidence",
+    "plate_crop_path",
+    "status"
+])
 
-def clean_plate(text):
-    text = text.upper()
-    text = re.sub(r"[^A-Z0-9]", "", text)
-    return text
+
+# =========================
+# PROCESS VIDEO
+# =========================
+
+frame_count = 0
+evidence_count = 0
+
+print("Processing video... Please wait.")
 
 while True:
     ret, frame = cap.read()
@@ -53,175 +324,163 @@ while True:
     if not ret:
         break
 
-    frame_no += 1
+    frame_count += 1
+    if frame_count > max_frames_to_process:
+        break
 
-    # Process OCR only every 10th frame for speed
-    if frame_no % 10 != 0:
-        out.write(frame)
+    display_frame = frame.copy()
+
+    # Process only selected frames for speed
+    if frame_count % PROCESS_EVERY_N_FRAMES != 0:
+        out.write(display_frame)
         continue
 
-    enhanced = cv2.convertScaleAbs(frame, alpha=1.6, beta=40)
+    results = vehicle_model(frame, verbose=False)[0]
 
-    results = model(enhanced, conf=0.35, verbose=False)
+    for box in results.boxes:
+        cls_id = int(box.cls[0])
+        label = vehicle_model.names[cls_id]
+        conf = float(box.conf[0])
 
-    for result in results:
-        for box in result.boxes:
-            cls_id = int(box.cls[0])
-            cls_name = model.names[cls_id]
-            conf = float(box.conf[0])
+        if label not in VEHICLE_CLASSES:
+            continue
 
-            if cls_name not in vehicle_classes:
-                continue
+        if conf < 0.35:
+            continue
 
-            vehicles_detected += 1
+        x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(width, x2)
+        y2 = min(height, y2)
 
-            vehicle_h = y2 - y1
-            vehicle_w = x2 - x1
+        vehicle_crop = frame[y1:y2, x1:x2]
 
-            if vehicle_h <= 0 or vehicle_w <= 0:
-                continue
+        if vehicle_crop.size == 0:
+            continue
 
-            # Approximate number plate area: lower-middle vehicle region
-            px1 = x1 + int(vehicle_w * 0.25)
-            px2 = x1 + int(vehicle_w * 0.75)
-            py1 = y1 + int(vehicle_h * 0.65)
-            py2 = y1 + int(vehicle_h * 0.90)
+        plate_candidates = find_plate_candidates(vehicle_crop)
 
-            px1 = max(0, px1)
-            py1 = max(0, py1)
-            px2 = min(width, px2)
-            py2 = min(height, py2)
+        best_plate_text = ""
+        best_ocr_conf = 0
+        best_plate_crop = None
+        best_plate_box = None
 
-            plate_roi = enhanced[py1:py2, px1:px2]
+        for px1, py1, px2, py2, plate_crop in plate_candidates:
+            plate_text, ocr_conf = run_best_ocr(plate_crop)
 
-            plate_text = ""
-            ocr_conf = 0.0
+            if ocr_conf > best_ocr_conf:
+                best_ocr_conf = ocr_conf
+                best_plate_text = plate_text
+                best_plate_crop = plate_crop
+                best_plate_box = (px1, py1, px2, py2)
 
-            if plate_roi.size > 0:
-                gray = cv2.cvtColor(plate_roi, cv2.COLOR_BGR2GRAY)
-                gray = cv2.resize(gray, None, fx=2, fy=2)
-                gray = cv2.bilateralFilter(gray, 11, 17, 17)
+        # Draw vehicle box
+        cv2.rectangle(
+            display_frame,
+            (x1, y1),
+            (x2, y2),
+            (0, 255, 0),
+            2
+        )
 
-                ocr_results = reader.readtext(gray)
+        cv2.putText(
+            display_frame,
+            f"{label} {conf:.2f}",
+            (x1, max(30, y1 - 10)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
+        )
 
-                if len(ocr_results) > 0:
-                    best = max(ocr_results, key=lambda x: x[2])
-                    raw_text = best[1]
-                    ocr_conf = float(best[2])
-                    plate_text = clean_plate(raw_text)
+        if best_plate_text:
+            evidence_count += 1
+            evidence_id = f"PLATE_{evidence_count:04d}"
 
-            cv2.rectangle(enhanced, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            plate_crop_path = os.path.join(
+                PLATE_EVIDENCE_DIR,
+                f"{evidence_id}_{best_plate_text}.jpg"
+            )
+
+            # Save zoomed enhanced crop as proof
+            zoomed_crop = cv2.resize(
+                best_plate_crop,
+                None,
+                fx=4,
+                fy=4,
+                interpolation=cv2.INTER_CUBIC
+            )
+
+            cv2.imwrite(plate_crop_path, zoomed_crop)
+
+            if best_plate_box:
+                px1, py1, px2, py2 = best_plate_box
+
+                # Convert vehicle crop coordinates to full-frame coordinates
+                fx1 = x1 + px1
+                fy1 = y1 + py1
+                fx2 = x1 + px2
+                fy2 = y1 + py2
+
+                cv2.rectangle(
+                    display_frame,
+                    (fx1, fy1),
+                    (fx2, fy2),
+                    (255, 255, 0),
+                    2
+                )
+
             cv2.putText(
-                enhanced,
-                f"{cls_name} {conf:.2f}",
-                (x1, max(y1 - 8, 20)),
+                display_frame,
+                f"PLATE: {best_plate_text}",
+                (x1, min(height - 20, y2 + 25)),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
+                0.7,
+                (0, 255, 255),
                 2
             )
 
-            cv2.rectangle(enhanced, (px1, py1), (px2, py2), (0, 0, 255), 2)
+            writer.writerow([
+                evidence_id,
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                frame_count,
+                label,
+                best_plate_text,
+                best_ocr_conf,
+                plate_crop_path,
+                "PLATE_READ"
+            ])
 
-            if plate_text and len(plate_text) >= 4:
-                plates_detected += 1
-
-                plate_records.append([
-                    evidence_id,
-                    datetime.now(),
-                    cls_name,
-                    plate_text,
-                    round(ocr_conf, 2),
-                    frame_no
-                ])
-
-                cv2.putText(
-                    enhanced,
-                    f"Plate: {plate_text} ({ocr_conf:.2f})",
-                    (px1, max(py1 - 8, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
-            else:
-                cv2.putText(
-                    enhanced,
-                    "Plate ROI",
-                    (px1, max(py1 - 8, 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
-
-    cv2.rectangle(enhanced, (20, 20), (760, 150), (0, 0, 0), -1)
+        else:
+            cv2.putText(
+                display_frame,
+                "Plate not readable",
+                (x1, min(height - 20, y2 + 25)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2
+            )
 
     cv2.putText(
-        enhanced,
-        "AI License Plate OCR - Night Mode",
-        (30, 55),
+        display_frame,
+        "Improved ANPR: Vehicle + Plate Region + Zoom OCR",
+        (20, 40),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (255, 255, 255),
         2
     )
 
-    cv2.putText(
-        enhanced,
-        f"Evidence ID: {evidence_id}",
-        (30, 90),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (255, 255, 255),
-        2
-    )
-
-    cv2.putText(
-        enhanced,
-        f"Vehicles: {vehicles_detected} | Plates Read: {plates_detected}",
-        (30, 125),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 255),
-        2
-    )
-
-    out.write(enhanced)
-
-    if frame_no % 100 == 0:
-        print(f"Processed {frame_no} frames...")
+    out.write(display_frame)
 
 cap.release()
 out.release()
+csv_file.close()
 
-with open(CSV_PATH, "w", newline="") as file:
-    writer = csv.writer(file)
-    writer.writerow([
-        "Evidence ID",
-        "Timestamp",
-        "Vehicle Type",
-        "Plate Text",
-        "OCR Confidence",
-        "Frame Number"
-    ])
-
-    if plate_records:
-        writer.writerows(plate_records)
-    else:
-        writer.writerow([
-            evidence_id,
-            datetime.now(),
-            "N/A",
-            "No reliable plate read",
-            0.0,
-            "N/A"
-        ])
-
-print("Done!")
-print("Output:", OUTPUT_PATH)
-print("Report:", CSV_PATH)
-print("Vehicles Detected:", vehicles_detected)
-print("Plates Read:", plates_detected)
+print("✅ Improved license plate OCR completed.")
+print(f"🎥 Output video saved at: {OUTPUT_VIDEO}")
+print(f"📄 CSV report saved at: {OUTPUT_CSV}")
+print(f"🖼 Plate evidence crops saved in: {PLATE_EVIDENCE_DIR}")
