@@ -1,0 +1,17 @@
+.venv/
+traffic-violation-ai/.venv/
+.vscode/
+runs/
+traffic-violation-ai/data/
+traffic-violation-ai/models/
+traffic-violation-ai/bus.jpg
+outputs/
+traffic-violation-ai/outputs/
+
+videos/
+traffic-violation-ai/videos/
+
+__pycache__/
+*.pyc
+*.mp4
+*.pt

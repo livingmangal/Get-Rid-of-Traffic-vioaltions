@@ -1,0 +1,1 @@
+.venv\Scripts\activate# Get-Rid-of-Traffic-vioaltions
