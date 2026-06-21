@@ -1,221 +1,216 @@
-﻿import requests
+﻿import os
+import requests
 import pandas as pd
 import streamlit as st
-import plotly.express as px
-
-API_BASE = "http://127.0.0.1:8000"
 
 st.set_page_config(
     page_title="IntelliTraffic API Dashboard",
-    page_icon="🌐",
-    layout="wide",
+    page_icon="🚦",
+    layout="wide"
 )
 
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: linear-gradient(135deg, #020617 0%, #0f172a 55%, #020617 100%);
-        color: white;
-    }
-    section[data-testid="stSidebar"] {
-        background: #020617;
-    }
-    .title {
-        font-size: 48px;
-        font-weight: 900;
-        background: linear-gradient(90deg, #38bdf8, #22c55e, #facc15);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .subtitle {
-        color: #cbd5e1;
-        font-size: 18px;
-        margin-bottom: 25px;
-    }
-    .card {
-        background: rgba(15,23,42,0.82);
-        border: 1px solid rgba(148,163,184,0.25);
-        border-radius: 20px;
-        padding: 22px;
-        box-shadow: 0 14px 38px rgba(0,0,0,0.35);
-        margin-bottom: 18px;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+# -------------------------------------------------
+# API URL CONFIG
+# Local default: FastAPI running on your laptop
+# Streamlit Cloud: use demo fallback if API not available
+# Future: add API_BASE_URL in Streamlit secrets
+# -------------------------------------------------
 
-
-def get_json(endpoint, params=None):
+def get_api_base_url():
     try:
-        response = requests.get(
-            API_BASE + endpoint,
-            params=params,
-            timeout=10,
+        return st.secrets.get(
+            "API_BASE_URL",
+            os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
         )
-        response.raise_for_status()
-        return response.json()
-    except Exception as error:
-        st.error(f"API error: {error}")
-        st.info("Start backend first: python -m uvicorn backend_api:app --reload --port 8000")
-        st.stop()
+    except Exception:
+        return os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 
-def style_fig(fig):
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,23,42,0.25)",
-        font_color="white",
-        margin=dict(l=20, r=20, t=55, b=30),
-    )
-    return fig
+API_BASE_URL = get_api_base_url()
 
 
-st.markdown('<div class="title">IntelliTraffic API Dashboard</div>', unsafe_allow_html=True)
-st.markdown(
-    '<div class="subtitle">Dashboard fetching violation records and analytics from FastAPI backend.</div>',
-    unsafe_allow_html=True,
-)
+# -------------------------------------------------
+# DEMO FALLBACK DATA
+# -------------------------------------------------
 
-health = get_json("/health")
-summary = get_json("/analytics/summary")
-
-st.sidebar.title("🌐 Backend Status")
-st.sidebar.success("FastAPI connected")
-st.sidebar.write("Database Mode:", health.get("database_mode"))
-st.sidebar.write("Records:", health.get("records_available"))
-st.sidebar.write("MongoDB:", health.get("mongo_connected"))
-
-st.sidebar.markdown("---")
-st.sidebar.title("Filters")
-
-violation_type = st.sidebar.text_input("Violation type contains")
-hotspot = st.sidebar.text_input("Hotspot contains")
-vehicle_number = st.sidebar.text_input("Vehicle number contains")
-min_severity = st.sidebar.slider("Minimum severity", 1, 5, 1)
-
-params = {
-    "min_severity": min_severity,
+DEMO_HEALTH = {
+    "status": "demo",
+    "message": "Running in Streamlit demo mode"
 }
 
-if violation_type:
-    params["violation_type"] = violation_type
+DEMO_ANALYTICS = {
+    "total_violations": 2,
+    "wrong_side_cases": 1,
+    "helmet_violations": 1,
+    "evidence_generated": 2
+}
 
-if hotspot:
-    params["hotspot"] = hotspot
+DEMO_RECORDS = [
+    {
+        "violation_id": "V001",
+        "violation_type": "Wrong-Side Driving",
+        "location": "Flyover Road",
+        "status": "Violation Detected",
+        "evidence": "Generated",
+        "timestamp": "2026-06-21 06:06:39"
+    },
+    {
+        "violation_id": "V002",
+        "violation_type": "No Helmet",
+        "location": "Traffic Road",
+        "status": "Violation Detected",
+        "evidence": "Generated",
+        "timestamp": "2026-06-21 06:15:00"
+    }
+]
 
-if vehicle_number:
-    params["vehicle_number"] = vehicle_number
 
-violations_response = get_json("/violations", params=params)
-records = violations_response.get("records", [])
+def fetch_json(endpoint, fallback):
+    url = f"{API_BASE_URL}{endpoint}"
+
+    try:
+        response = requests.get(url, timeout=4)
+
+        if response.status_code == 200:
+            return response.json(), True, None
+
+        return fallback, False, f"API returned status code {response.status_code}"
+
+    except Exception as error:
+        return fallback, False, str(error)
+
+
+# -------------------------------------------------
+# DASHBOARD UI
+# -------------------------------------------------
+
+st.title("🚦 IntelliTraffic API Dashboard")
+
+st.write(
+    "Dashboard for traffic violation records, analytics, and evidence generated by the AI prototype."
+)
+
+st.markdown("---")
+
+health, api_connected, api_error = fetch_json("/health", DEMO_HEALTH)
+
+if api_connected:
+    st.success(f"API Connected Successfully: {API_BASE_URL}")
+else:
+    st.warning(
+        "API backend is not connected. Showing demo dashboard data for deployment preview."
+    )
+
+    with st.expander("API Details"):
+        st.write("Current API URL:")
+        st.code(API_BASE_URL)
+        st.write("Error:")
+        st.code(api_error)
+
+st.markdown("---")
+
+analytics, analytics_connected, _ = fetch_json("/analytics", DEMO_ANALYTICS)
+
+total_violations = analytics.get("total_violations", 2)
+wrong_side_cases = analytics.get("wrong_side_cases", 1)
+helmet_violations = analytics.get("helmet_violations", 1)
+evidence_generated = analytics.get("evidence_generated", 2)
+
+col1, col2, col3, col4 = st.columns(4)
+
+col1.metric("Total Violations", total_violations)
+col2.metric("Wrong-Side Cases", wrong_side_cases)
+col3.metric("Helmet Violations", helmet_violations)
+col4.metric("Evidence Generated", evidence_generated)
+
+st.markdown("---")
+
+st.subheader("📊 Violation Records")
+
+records_response, records_connected, _ = fetch_json(
+    "/violations",
+    {"records": DEMO_RECORDS}
+)
+
+records = records_response.get("records", DEMO_RECORDS)
+
 df = pd.DataFrame(records)
 
-c1, c2, c3, c4, c5 = st.columns(5)
+st.dataframe(df, use_container_width=True)
 
-c1.metric("Total Records", summary.get("total_records", 0))
-c2.metric("Total Demo Fine", f"₹{summary.get('total_fine', 0)}")
-c3.metric("Average Severity", summary.get("average_severity", 0))
-c4.metric("High Severity", summary.get("high_severity_count", 0))
-c5.metric("Unique Vehicles", summary.get("unique_vehicles", 0))
+st.markdown("---")
 
-st.markdown("## 📊 API Analytics")
+st.subheader("🧠 Detection Modules")
 
-type_data = get_json("/analytics/by-type")
-module_data = get_json("/analytics/by-module")
-hotspot_data = get_json("/analytics/hotspots")
+left, right = st.columns(2)
 
-chart_col1, chart_col2 = st.columns(2)
-
-with chart_col1:
-    type_df = pd.DataFrame(type_data)
-
-    if not type_df.empty:
-        fig = px.bar(
-            type_df,
-            x="violation_type",
-            y="count",
-            text="count",
-            title="Violations by Type from API",
-        )
-        st.plotly_chart(style_fig(fig), use_container_width=True)
-    else:
-        st.warning("No violation type analytics found.")
-
-with chart_col2:
-    module_df = pd.DataFrame(module_data)
-
-    if not module_df.empty:
-        fig = px.bar(
-            module_df,
-            x="module",
-            y="count",
-            text="count",
-            title="Records by Module from API",
-        )
-        st.plotly_chart(style_fig(fig), use_container_width=True)
-    else:
-        st.warning("No module analytics found.")
-
-st.markdown("## 🗺️ Hotspot Map from API")
-
-hotspot_df = pd.DataFrame(hotspot_data)
-
-if not hotspot_df.empty:
-    fig = px.scatter_mapbox(
-        hotspot_df,
-        lat="latitude",
-        lon="longitude",
-        size="violations",
-        color="average_severity",
-        hover_name="hotspot",
-        hover_data=["violations", "total_fine", "average_severity"],
-        zoom=10,
-        height=520,
-        title="Violation Hotspots from FastAPI",
+with left:
+    st.markdown("### Flyover Wrong-Side Detection")
+    st.write(
+        """
+        - Detects vehicles in flyover footage  
+        - Tracks vehicle movement direction  
+        - Compares movement with valid road direction  
+        - Marks violation if vehicle moves opposite  
+        - Generates evidence frame  
+        """
     )
 
-    fig.update_layout(
-        mapbox_style="open-street-map",
-        paper_bgcolor="rgba(0,0,0,0)",
-        font_color="white",
-        margin=dict(l=0, r=0, t=45, b=0),
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.warning("No hotspot data found.")
-
-st.markdown("## 📁 Violation Records from API")
-
-if df.empty:
-    st.warning("No records returned from API.")
-else:
-    st.dataframe(df, use_container_width=True, height=420)
-
-    st.markdown("## 📲 Alert Preview from API")
-
-    selected_evidence = st.selectbox(
-        "Select Evidence ID",
-        df["evidence_id"].astype(str).tolist(),
-    )
-
-    alert_data = get_json(f"/alerts/preview/{selected_evidence}")
-
-    st.markdown(
-        f"""
-        <div class="card">
-            <h3>Alert Message</h3>
-            <p><b>Evidence:</b> {alert_data.get("evidence_id")}</p>
-            <p><b>Vehicle:</b> {alert_data.get("vehicle_number")}</p>
-            <p><b>Violation:</b> {alert_data.get("violation_type")}</p>
-            <p><b>Message:</b> {alert_data.get("message")}</p>
-            <p><b>Status:</b> {alert_data.get("status")}</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+with right:
+    st.markdown("### Helmet Violation Detection")
+    st.write(
+        """
+        - Detects motorcycle riders  
+        - Identifies possible no-helmet cases  
+        - Marks violation on video frame  
+        - Saves evidence for review  
+        - Helps reduce manual monitoring  
+        """
     )
 
 st.markdown("---")
-st.caption("IntelliTraffic AI API Dashboard | FastAPI + MongoDB-ready + Streamlit")
+
+st.subheader("⚙️ System Workflow")
+
+st.code(
+    """
+Traffic Video
+     ↓
+OpenCV Frame Processing
+     ↓
+YOLO Object Detection
+     ↓
+Violation Logic
+     ↓
+Evidence Frame Generation
+     ↓
+FastAPI / Demo API Records
+     ↓
+Streamlit Dashboard
+    """,
+    language="text"
+)
+
+st.markdown("---")
+
+st.subheader("🚀 Local Run Instructions")
+
+st.code(
+    """
+# Terminal 1: Start FastAPI backend
+python -m uvicorn backend_api:app --reload --port 8000
+
+# Terminal 2: Start API dashboard
+python -m streamlit run api_dashboard.py
+    """,
+    language="bash"
+)
+
+st.markdown("---")
+
+st.subheader("📦 Repository")
+
+st.write("GitHub Repository:")
+st.code("https://github.com/Mrigank-loop/Get-Rid-of-Traffic-vioaltions")
+
+st.success("API dashboard ready for Streamlit deployment.")
