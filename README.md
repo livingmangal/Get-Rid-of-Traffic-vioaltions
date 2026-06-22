@@ -160,75 +160,54 @@ This is a prototype system. Final numeric accuracy, precision, recall, F1-score,
 ### 1. Install dependencies
 
 ```bash
-pip install -r requirements.txt
+pip install -r traffic-violation-ai/requirements.txt
 ```
 
-Or manually:
+### 2. Run the Full Pipeline
+
+The project has been refactored into a modular architecture. You can now run the entire pipeline (detectors, analytics, and dashboards) using a single command from the `traffic-violation-ai` directory:
 
 ```bash
-pip install ultralytics opencv-python pandas streamlit easyocr plotly fastapi uvicorn pymongo requests
+cd traffic-violation-ai
+python run_all.py
 ```
 
-### 2. Run detection modules
+You will be prompted to choose:
+1. **Run Full Pipeline**: Runs all detectors sequentially, generates analytics, starts the backend API, and launches the Streamlit dashboard.
+2. **Run Analytics & Dashboard Only**: Skips the time-consuming detection phase if you already have the outputs generated.
+3. **Run Dashboard Only**: Only starts the FastAPI backend and Streamlit dashboard.
+
+### 3. Run FastAPI backend (Manual)
+
+If you wish to run the backend separately:
 
 ```bash
-python night_video_detector.py
-python vehicle_pedestrian_detector.py
-python wrong_side_detector.py
-python helmet_detector.py
-python triple_riding_detector.py
-python waterlogging_detector.py
-python license_plate_ocr.py
+cd traffic-violation-ai
+python -m uvicorn api.backend:app --reload --port 8000
 ```
 
-### 3. Generate smart violation records
+Open API docs: `http://127.0.0.1:8000/docs`
+
+### 4. Run Streamlit Dashboards (Manual)
+
+The unified dashboard can be launched manually:
 
 ```bash
-python smart_features.py
-```
-
-### 4. Run main premium dashboard
-
-```bash
-python -m streamlit run dashboard.py
-```
-
-### 5. Run smart dashboard
-
-```bash
-python -m streamlit run smart_dashboard.py
-```
-
-### 6. Run FastAPI backend
-
-```bash
-python -m uvicorn backend_api:app --reload --port 8000
-```
-
-Open API docs:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-### 7. Run API dashboard
-
-```bash
-python -m streamlit run api_dashboard.py
+cd traffic-violation-ai
+python -m streamlit run dashboards/main.py
 ```
 
 ---
 
 ## Demo Flow
 
-1. Show processed violation videos from the `outputs` folder.
-2. Open the main premium dashboard.
-3. Show module-wise reports and video evidence.
-4. Open smart dashboard.
-5. Show severity score, fine generator, heatmap, and alert generator.
-6. Open FastAPI `/docs`.
-7. Open API dashboard.
-8. Show that dashboard is fetching data from backend API.
+1. Run the full pipeline via `python run_all.py`.
+2. Show processed violation videos and evidence frames from the `outputs/` folder.
+3. Open the unified Streamlit Dashboard (`http://localhost:8501`).
+4. Navigate through the **Main Dashboard** to see metrics and recent smart alerts.
+5. Navigate to the **Advanced Analytics** tab to view the geographic hotspot heatmap and fine revenue distributions.
+6. Navigate to the **API Explorer** tab to interact directly with the FastAPI backend.
+7. Open FastAPI `/docs` at `http://127.0.0.1:8000/docs` to show the Swagger UI.
 
 ---
 

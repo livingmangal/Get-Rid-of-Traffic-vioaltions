@@ -31,3 +31,21 @@ def recommendation(violation_type):
         "WATERLOGGING": "Reroute traffic and alert municipal drainage team."
     }
     return actions.get(violation_type, "Continue monitoring.")
+
+def classify_traffic_density(vehicle_count):
+    if vehicle_count < 5:
+        return "LOW"
+    elif vehicle_count < 15:
+        return "MEDIUM"
+    else:
+        return "HIGH"
+
+def classify_pedestrian_safety(pedestrians, total_vehicles):
+    if pedestrians == 0:
+        return "SAFE"
+    elif pedestrians <= 5 and total_vehicles <= 5:
+        return "LOW RISK"
+    elif pedestrians <= 10:
+        return "MODERATE RISK"
+    else:
+        return "HIGH RISK"
